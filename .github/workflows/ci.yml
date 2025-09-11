@@ -1,0 +1,146 @@
+---
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'feature/*']
+  workflow_dispatch:      # allows manual trigger from the GitHub UI
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  security-events: write
+
+jobs:
+  init:
+    name: Init
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.sanitize.outputs.tag }}
+    steps:
+      - name: sanitize tag
+        id: sanitize
+        run: |
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            TAG="latest"
+          else
+            SANITIZED_BRANCH="${{ github.ref_name }}"
+            SANITIZED_BRANCH="${SANITIZED_BRANCH//\//-}"
+            TAG="${SANITIZED_BRANCH}"
+          fi
+          echo "TAG=$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      TAG: ${{ needs.init.outputs.tag }}
+    needs: init
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ github.repository }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}-${{ matrix.arch }}
+          platforms: ${{ matrix.arch }}
+          oci: true
+          containerfiles: |
+            ./Containerfile
+          labels: |
+            org.opencontainers.image.title=ansible
+            org.opencontainers.image.description=a ansible container based on alpine linux
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.built-by=${{ github.actor }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.TAG }}-${{ matrix.arch }}
+          format: sarif
+          output: trivy-results-${{ matrix.arch }}.sarif
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to Github Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results-${{ matrix.arch }}.sarif
+          category: trivy-${{ github.ref_name }}
+
+      - name: Push image to GitHub Container Registry
+        id: push
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          tags: ${{ steps.build.outputs.tags }}
+
+      - name: Sign image with cosign using fulcio (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          DIGEST=${{ steps.push.outputs.digest }}
+          cosign sign --yes $IMAGE@$DIGEST
+
+  manifest:
+    name: Manifest (multi-arch)
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      TAG: ${{ needs.init.outputs.tag }}
+    needs: 
+      - init
+      - build
+
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to github container registry
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        id: manifest
+        run: |
+          DIGEST_FILE=manifest-digest.txt
+          buildah manifest create ${{ env.IMAGE }}:${{ env.TAG }}
+          buildah manifest add ${{ env.IMAGE }}:${{ env.TAG }} --annotation io.buildah.platform=linux/amd64 docker://${{ env.IMAGE }}:${{ env.TAG }}-amd64
+          buildah manifest add ${{ env.IMAGE }}:${{ env.TAG }} --annotation io.buildah.platform=linux/arm64 docker://${{ env.IMAGE }}:${{ env.TAG }}-arm64
+          buildah manifest push --all --digestfile $DIGEST_FILE ${{ env.IMAGE }}:${{ env.TAG }} docker://${{ env.IMAGE }}:${{ env.TAG }}
+          echo "digest=$(cat $DIGEST_FILE)" >> $GITHUB_OUTPUT
+
+      - name: Sign multi-arch manifest using fulcio (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          DIGEST=${{ steps.manifest.outputs.digest }}
+          cosign sign --yes ${{ env.IMAGE }}@$DIGEST

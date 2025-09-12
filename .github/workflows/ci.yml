@@ -81,6 +81,19 @@ jobs:
             org.opencontainers.image.version=${{ github.sha }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Push image to GitHub Container Registry
+        id: push
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          tags: ${{ steps.build.outputs.tags }}
+
+      - name: Sign image with cosign using fulcio (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          DIGEST=${{ steps.push.outputs.digest }}
+          cosign sign --yes $IMAGE@$DIGEST
+
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
@@ -94,19 +107,6 @@ jobs:
         with:
           sarif_file: trivy-results-${{ matrix.arch }}.sarif
           category: trivy-${{ github.ref_name }}
-
-      - name: Push image to GitHub Container Registry
-        id: push
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          tags: ${{ steps.build.outputs.tags }}
-
-      - name: Sign image with cosign using fulcio (keyless)
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-        run: |
-          DIGEST=${{ steps.push.outputs.digest }}
-          cosign sign --yes $IMAGE@$DIGEST
 
   manifest:
     name: Manifest (multi-arch)

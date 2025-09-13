@@ -1,18 +1,17 @@
 ---
-name: maintenance
+name: maintenance schedule
 
 on:
-  push:
-    branches:
-      - 'feature/**'
+  schedule:
+    - cron: '0 0 * * *'   # every day at 00:00 UTC
   workflow_dispatch:      # allows manual trigger from the GitHub UI
 
 permissions:
   packages: write
 
 jobs:
-  cleanup-ghcr:
-    name: Cleanup GitHub Container Registry
+  ghcr-cleanup:
+    name: GHCR cleanup
     runs-on: ubuntu-latest
     steps:
       - uses: dataaxiom/ghcr-cleanup-action@v1
@@ -22,5 +21,3 @@ jobs:
           delete-ghost-images: true
           delete-orphaned-images: true
           delete-partial-images: true
-          # dry-run: true
-

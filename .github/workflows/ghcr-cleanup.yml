@@ -20,23 +20,27 @@ jobs:
       - name: Determine deleted or merged branch
         id: sanitize
         run: |
-          if [[ "${{ github.event_name }}" == "delete" ]]; then
-            BRANCH_NAME="${{ github.event.ref#refs/heads/ }}"
-            echo "Branch deleted: $BRANCH_NAME"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-            echo "Branch merged from PR: $BRANCH_NAME"
-          else
-            echo "Unknown event"
-            exit 1
-          fi
+          case "${{ github.event_name }}" in
+            delete)
+              FULL_REF="${{ github.event.ref }}"
+              BRANCH_NAME="${FULL_REF#refs/heads/}"
+              echo "Branch deleted: $BRANCH_NAME"
+              ;;
+            pull_request)
+              BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+              echo "Branch merged from PR: $BRANCH_NAME"
+              ;;
+            *)
+              echo "Unsupported event: ${{ github.event_name }}"
+              exit 1
+              ;;
+          esac
 
           if [[ "$BRANCH_NAME" == "main" ]]; then
             TAG="latest"
           else
             TAG="${BRANCH_NAME//\//-}"
           fi
-
           echo "Sanitized tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
